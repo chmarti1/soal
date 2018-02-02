@@ -358,7 +358,26 @@ efficient to make multiple calls to the roots method.
 """
         if self._roots is None:
             _roots = []
+            # Create a deflatable polynomial
             dd = Poly(self)
+            dd._rzeros()
+            # Remove any roots at the origin
+            ii = 0
+            while dd.coef[ii] == 0.:
+                ii+=1
+            if ii>0:
+                _roots += [0.]*ii
+                dd.coef = dd.coef[ii:]
+            # Now that the constant term is definitely non-zero
+            # Re-scale x so that the highest-order coefficient and the 
+            # constant term are both unity.
+            dd.coef /= dd.coef[0]
+            scale = dd.coef[-1] ** (-1. / (dd.coef.size-1))
+            temp = scale
+            for ii in range(1,dd.coef.size):
+                dd.coef[ii] *= temp
+                temp *= scale
+            
             while dd.coef.size > 3:
                 z = dd._riter()
                 _roots.append(z)
@@ -371,7 +390,10 @@ efficient to make multiple calls to the roots method.
                 self._roots = np.concatenate((_roots, dd._rexpl()))
             else:
                 self._roots = np.array(_roots)
+            self._roots *= scale
+            
         return self._roots
+
 
 class Rational(Soal):
     def __init__(self,num,den):
@@ -381,3 +403,20 @@ class Rational(Soal):
     def __call__(self,x):
         return self.num(x) / self.den(x)
         
+    def __repr__(self, x='x'):
+        N = self.num.__repr__(x)
+        D = self.den.__repr__(x)
+        width = 0
+        line = 0
+        for cc in N:
+            line += 1
+            if cc == '\n':
+                width = max(width,line)
+                line = 0
+        line = 0
+        for cc in D:
+            line += 1
+            if cc == '\n':
+                width = max(width,line)
+                line = 0
+        return N + '-' * width + D
