@@ -5,12 +5,49 @@ Control analysis toolkit
 
 import numpy as np
 import os
+import matplotlib.pyplot as plt
 
 
 class Soal(object):
     """The Snake-on-a-Leash base class
 """
-    pass
+    def tplot(self,t,x, figure=None, xlines=None, tlines=None, *varg, **kwarg):
+        """Time plot
+    ax = tplot(t,x)
+"""
+        if figure is None:
+            f = plt.figure()
+        else:
+            f = plt.figure(figure)
+        ax = f.add_subplot(111)
+        ax.set_ylabel('response')
+        ax.set_xlabel('time')
+
+        tmin = np.min(t)
+        tmax = np.max(t)
+        xmin = np.min(x)
+        xmax = np.max(x)
+        # Round xmin and xmax
+        dx = xmax-xmin
+        power = 10**(np.floor(np.log10(dx))-1)
+        xmin = np.floor(xmin/power-1)*power
+        xmax = np.ceil(xmax/power+1)*power
+        
+        ax.set_xlim([tmin, tmax])
+        ax.set_ylim([xmin, xmax])
+        
+        if xlines is not None:
+            plt.hlines(xlines, xmin=tmin, xmax=tmax, linestyles='dashed', colors='k')
+        if tlines is not None:
+            plt.vlines(tlines, ymin=xmin, ymax=xmax, linestyles='dashed', colors='k')
+
+        ax.plot(t,x, *varg, **kwarg)
+        ax.grid('on')
+        plt.show(block=False)
+        
+        return ax
+        
+        
 
 class Poly(Soal):
     """Polynomial class
@@ -77,8 +114,6 @@ Once defined, a polynomial can be called like a function
     def __len__(self):
         return self.coef.size
         
-    def __getitem__(self, ii):
-        return self.coef[ii]
         
     def __setitem__(self, ii, value):
         if ii > self.coef.size:
@@ -94,6 +129,14 @@ Once defined, a polynomial can be called like a function
     #
     def __neg__(self):
         return Poly(-self.coef)
+        
+    def __eq__(self, b):
+        """ p1 == p2"""
+        if isinstance(b,Poly):
+            if b.coef.size != self.coef.size:
+                return False
+            return (self.coef == b.coef).all()
+        return self.coef.size==1 and self.coef[0] == b
         
     def __add__(self, b):
         """ p1 + p2
@@ -190,6 +233,12 @@ Once defined, a polynomial can be called like a function
         
     def __mod__(self, d):
         return self.__divmod__(d)[1]
+        
+    def __pow__(self, ex):
+        out = Poly(self)
+        for ii in range(ex-1):
+            out *= self
+        return out
 
     def _rzeros(self):
         """
@@ -232,7 +281,13 @@ forced to zero.
                 "z %d = %e + %ej\n"%(count, z.real, z.imag) +
                 "p(z) = %e + %ej\n"%(p.real, p.imag))
         while np.abs(p) > small and count < Nmax:
-            z += 2*p / (-dp - np.sqrt(dp*dp - 2.*p*ddp))
+            temp = (-dp - np.sqrt(dp*dp - 2.*p*ddp)) / 2. / p
+            # If the point is quite near an inflection, perturb the 
+            # root by a random interval and try again
+            if np.abs(temp) < small:
+                z+=np.random.rand()
+            else:
+                z += 1./temp
             p,dp,ddp = self.d(z,order=2)
             if verbose:
                 os.sys.stdout.write(
@@ -316,6 +371,8 @@ Z is an array of roots 0 to 2 elements long.
                 return np.array([temp/2./c[2], 2.*c[0]/temp])
             
         return None
+            
+        
 
     def order(self):
         """order()
@@ -351,23 +408,34 @@ Returns an array, z, of the polynomial roots so that p(z)==0
 Uses Mueler's method of quadratic root extrapolation for global 
 root finding and Newton's method for "polishing"
 
+Roots are always 
+
 Once a polynomial's roots have been calculated, they are stored
 in the p._roots member.  If _roots is not None, then it will be
 returned to prevent redundant iteration.  It is, therefore, 
 efficient to make multiple calls to the roots method.
 """
+        if self.coef.size <= 1:
+            self._roots = []
+            return self._roots
         if self._roots is None:
             _roots = []
             # Create a deflatable polynomial
             dd = Poly(self)
             dd._rzeros()
             # Remove any roots at the origin
-            ii = 0
-            while dd.coef[ii] == 0.:
-                ii+=1
+            for ii in range(self.coef.size):
+                if self.coef[ii]!=0.:
+                    break
             if ii>0:
                 _roots += [0.]*ii
                 dd.coef = dd.coef[ii:]
+
+            # If there are no roots left, halt
+            if dd.coef.size<=1:
+                self._roots = _roots
+                return self._roots
+
             # Now that the constant term is definitely non-zero
             # Re-scale x so that the highest-order coefficient and the 
             # constant term are both unity.
@@ -377,9 +445,13 @@ efficient to make multiple calls to the roots method.
             for ii in range(1,dd.coef.size):
                 dd.coef[ii] *= temp
                 temp *= scale
-            
+            # Start iteration
+            z = 0.
             while dd.coef.size > 3:
-                z = dd._riter()
+                # Use the root from the last solution as the initial 
+                # guess so that redundant roots will be quickly
+                # identified and will be in sequence to one another
+                z = dd._riter(zinit=z)
                 _roots.append(z)
                 if z.imag:
                     _roots.append(np.conj(z))
@@ -391,14 +463,54 @@ efficient to make multiple calls to the roots method.
             else:
                 self._roots = np.array(_roots)
             self._roots *= scale
-            
         return self._roots
+        
+        
+    def get_coef(self,k):
+        """Get coefficient
+    ck = p.get_coef(k)
+
+Retrieves a the polynomial coefficient, k, so that
+    p(x) = c0 + c1 x + c2 x**2 + ... ck x**k ... + cn x**n
+    
+This is different from p.coef[k] in that if k is greater than n,
+0. is returned rather than throwing an error.
+"""
+        if k>=self.coef.size:
+            return 0.
+        elif k<0:
+            raise Exception("GET_COEF: Received negative coefficient index, %s."%repr(k))
+        return self.coef[k]
 
 
 class Rational(Soal):
-    def __init__(self,num,den):
-        self.num = Poly(num)
-        self.den = Poly(den)
+    """Rational class
+    r = Rational(num,den)
+    
+Defines a rational function, r, comprised of a polynomial numerator, 
+num, and denominator, den.  They may be polynomials or array-like 
+coefficient arrays, and they will be stored as Poly instances at r.num 
+and r.den.
+
+The rational class uses the same function-like call implementation
+    r(x)
+to evaluate the rational function.  It also supports evaluation of the 
+first rational derivative
+    r.d(x)
+Higher derivatives like those supported by Poly are not yet implemented.
+"""
+    def __init__(self,num,den=None, natural=False):
+        if issubclass(type(num), Rational):
+            if den is not None:
+                raise Exception("Rational: Cannot simultaneously copy a rational and define a denominator.")
+            self.den = Poly(num.den)
+            self.num = Poly(num.num)
+        elif den is None:
+            self.num = Poly(num,natural=natural)
+            self.den = Poly(1)
+        else:
+            self.den = Poly(den,natural=natural)
+            self.num = Poly(num,natural=natural)
         
     def __call__(self,x):
         return self.num(x) / self.den(x)
@@ -420,3 +532,450 @@ class Rational(Soal):
                 width = max(width,line)
                 line = 0
         return N + '-' * width + D
+        
+    def __neg__(self):
+        return self.__class__(-self.num, self.den)
+        
+    def __add__(self, b):
+        c = self.__class__(b)
+        if c.den == self.den:
+            c.num += self.num
+        else:
+            c.num *= self.den
+            c.num += self.num * c.den
+            c.den *= self.den
+        return c
+        
+    def __radd__(self, b):
+        return self.__add__(b)
+        
+    def __sub__(self, b):
+        c = -self.__class__(b)
+        if c.den == self.den:
+            c.num += self.num
+        else:
+            c.num *= self.den
+            c.num += self.num * c.den
+            c.den *= self.den
+        return c
+        
+    def __rsub__(self,b):
+        c = self.__class__(b)
+        if c.den == self.den:
+            c.num -= self.num
+        else:
+            c.num *= self.den
+            c.num -= self.num * c.den
+            c.den *= self.den
+        return c
+        
+    def __mul__(self, b):
+        c = self.__class__(b)
+        c.num *= self.num
+        c.den *= self.den
+        return c
+        
+    def __rmul__(self, b):
+        return self.__mul__(b)
+        
+    def __div__(self, b):
+        c = self.__class__(b)
+        temp = c.num
+        c.num = c.den
+        c.den = temp
+        c.num *= self.num
+        c.den *= self.den
+        return c
+
+    def __rdiv__(self, b):
+        c = self.__class__(b)
+        c.num *= self.den
+        c.den *= self.num
+        return c
+
+    def order(self):
+        """System order
+    N = G.order()
+
+N is the number of system poles.
+"""
+        return self.den.order()
+        
+    def poles(self):
+        """Return the roots of the denomenator
+    p = r.poles()
+    
+Uses the denomenator's roots() method, so redundant calls to poles() are
+efficient.
+
+See also: zeros()
+"""
+        return self.den.roots()
+        
+    def zeros(self):
+        """Return the roots of the numerator
+    z = r.zeros()
+    
+Uses the numerator's roots() method, so redundant calls to zeros() are 
+efficient.
+
+See also: poles()
+"""
+        return self.num.roots()
+        
+        
+    def sub(self, x):
+        """Substitute a rational into the rational
+    r1 = soal.Rational( ... )
+    r2 = soal.Rational( ... )
+    r3 = r2.sub(r1)
+    
+r3 will be a new rational with coefficients calculated by substituting 
+r1 into r2.
+"""
+        if not issubclass(type(x),Rational):
+            raise Exception('SUB: The substituted value must be a rational')
+        
+        N = max(self.num.coef.size, self.den.coef.size)
+        ncoef = np.zeros((N,))
+        dcoef = np.zeros((N,))
+        ncoef[:self.num.coef.size] = self.num.coef
+        dcoef[:self.den.coef.size] = self.den.coef
+        term = x.den ** (N-1)
+        out = Rational(0,0)
+        for ii in range(N):
+            out.num += ncoef[ii] * term
+            out.den += dcoef[ii] * term
+            term /= x.den
+            term *= x.num
+        return out
+                
+        
+    def d(self,x):
+        n,dn = self.num.d(x)
+        d,dd = self.den.d(x)
+        return (dn - n*dd/d)/d
+
+
+    def expand(self):
+        """Perform a partial-fraction expansion
+    [g1, g2, g3 ... ] = G.expand()
+
+Where gx is a rational with one real pole of G or two complex conjugate
+poles of G.  The sum of the g's is equal to G.
+"""
+        g = []
+        for z in self.poles():
+            if z.imag<0:    # Ignore complex conjugates
+                pass
+            else:
+                A = self.num(z) / self.den.coef[-1]
+                redundant = False
+                for zz in self.poles():
+                    if z!=zz:
+                        A /= (z-zz)
+                    elif redundant:
+                        raise Exception("EXPAND: Failed with redundant poles.")
+                    else:
+                        redundant = True
+                if z.imag:
+                    gnew = Continuous(
+                        [-2*(A*z.conj()).real, 2.*A.real],
+                        [(z*z.conj()).real, -2*z.real, 1.])
+                    gnew._roots = np.array([z, z.conj()])
+                else:
+                    gnew = Continuous(
+                        [A], [-z, 1.])
+                    gnew._roots = np.array([z])
+                g.append(gnew)
+        return g
+
+
+class Continuous(Rational):
+    
+    def __repr__(self):
+        return Rational.__repr__(self,'s')
+
+
+    def _tgen(self, Nmax=1000):
+        """Generate a time array that will capture the most relevant aspects of
+the system's response
+    t = G._tgen(Nmax=1000)
+    
+Nmax is the maximum number of points allowed
+"""
+        small = 1e-6
+        tfast = float('inf')
+        tslow = 0.
+        for z in self.poles():
+            T = np.sqrt(z.real*z.real + (z.imag/2/np.pi)**2)
+            if T > small:
+                T = 1./T
+                tfast = min(tfast, T)
+                tslow = max(tslow, T)
+        if tslow == 0. or tfast == float('inf'):
+            tfast = 1.
+            tslow = 1.
+        dt = tfast / 10.
+        tmax = tslow * 10.
+        dt = max(dt, tmax / Nmax)
+        return np.arange(0.,tmax, dt)
+        
+
+    def time(self, t=None):
+        """Revert to the time domain
+    t,x = G.time()
+        OR
+    t,x = G.time(t=[t0, t1, ... ])
+    
+This method is only available on proper transfer functions of order 
+greater than 0 and less than 3.
+"""
+        if t is None:
+            dt,tmax = self.timescales()
+            dt = max(dt, 1e-2*tmax)
+            t = np.arange(0.,10.*tmax,.1*dt)
+                
+        if self.order()==2:
+            sigma = self.poles()[0].real
+            omega = np.abs(self.poles()[0].imag)
+            # Cosine coefficient
+            A = self.num.get_coef(1)
+            # Sine coefficient
+            B = (self.num.get_coef(0) + A*sigma)/omega
+            x = np.exp(sigma*t) * (A * np.cos(omega*t) + B * np.sin(omega*t))
+        elif self.order()==1:
+            sigma = self.poles()[0]
+            A = self.num.get_coef(0)
+            if sigma != 0.:
+                x = A * np.exp(sigma*t)
+            else:
+                x = A * np.ones(t.shape)
+        else:
+            raise Exception("TIME: Order %d cannot be converted to the time domain"%self.order())
+        return t,x
+        
+        
+    def state(self):
+        """Return state matrices representing the system
+    A,B,C,D = c.state()
+
+Where
+    xdot = Ax + Bu
+    y = Cx + Du
+"""
+        N = self.den.order()
+        if N==0 or self.num.order()>=N:
+            raise Exception("STATE: The transfer function is improper; cannot produce a state space realization.")
+        A = np.matrix(np.zeros((N,N)))
+        B = np.matrix(np.zeros((N,1)))
+        C = np.matrix(np.zeros((1,N)))
+        D = np.matrix(np.zeros((1,1)))
+        A[N-1,:] = -self.den.coef[:-1]/self.den.coef[-1]
+        for ii in range(N-1):
+            A[ii,ii+1] = 1.
+        B[N-1,0] = 1
+        C[0,:self.num.coef.size] = self.num.coef / self.den.coef[-1]
+        return A,B,C,D
+        
+        
+
+                
+        
+    def step(self, t=None, figure=None, verbose=True, coef=False):
+        """Calculate the step response of the system
+    t,x = G.step()
+    
+t and x are arrays of time and the system's state variable, x.
+"""
+        gg = (self*Continuous([1],[0,1])).expand()
+        if t is None:
+            t = self._tgen()
+        x = np.zeros(t.shape)
+        for g in gg:
+            _,xx = g.time(t=t)
+            x += xx
+        if verbose:
+            if self.den.get_coef(0)==0.:
+                xss = None
+            else:
+                xss = self.num.get_coef(0) / self.den.get_coef(0)
+            self.tplot(t,x,figure=figure,xlines=xss)
+        return t,x
+
+    def impulse(self, t=None, figure=None, verbose=True, coef=False):
+        """Calculate the impulse response of the system
+    t,x = G.impulse()
+    
+t and x are arrays of time and the system's state variable, x.
+"""
+        gg = self.expand()
+        if t is None:
+            t = self._tgen()
+        x = np.zeros(t.shape)
+        for g in gg:
+            _,xx = g.time(t=t)
+            x += xx
+        if verbose:
+            if self.den.get_coef(0)==0.:
+                if self.den.get_coef(1) == 0.:
+                    xss = None
+                else:
+                    xss = self.num.get_coef(0)/self.den.get_coef(1)
+            else:
+                xss = 0.
+            self.tplot(t,x,figure=figure,xlines=xss)
+        return t,x
+
+
+
+class Discrete(Rational):
+
+    def __init__(self, num, den=None, T=1, *arg, **kwarg):
+        Rational.__init__(self,num,den, *arg, **kwarg)
+        self.T = T
+        self._xhist = np.zeros((self.den.coef.size-1,))
+        self._uhist = np.zeros((self.num.coef.size-1,))
+
+    def __repr__(self):
+        return Rational.__repr__(self,'z')
+
+    def state(self):
+        """Return state matrices representing the system
+    A,B,C,D = c.state()
+
+Where
+    xk+1 = A xk + B uk+1
+    yk+1 = C xk+1 + D uk+1
+"""
+        N = self.den.order()
+        if N==0 or self.num.order()>=N:
+            raise Exception("STATE: The transfer function is improper; cannot produce a state space realization.")
+        A = np.matrix(np.zeros((N,N)))
+        B = np.matrix(np.zeros((N,1)))
+        C = np.matrix(np.zeros((1,N)))
+        D = np.matrix(np.zeros((1,1)))
+        A[N-1,:] = -self.den.coef[:-1]/self.den.coef[-1]
+        for ii in range(N-1):
+            A[ii,ii+1] = 1.
+        B[N-1,0] = 1
+        C[0,:self.num.coef.size] = self.num.coef / self.den.coef[-1]
+        return A,B,C,D
+        
+    def sim(self, uk=0., xinit=None, uinit=None):
+        """Calculate the next sample of the system respone to an input uk
+    xk = G.sim(uk=0.)
+    
+To initialize a new simulation, use the optional xinit and uinit 
+arguments.
+
+    xk = G.sim(uk, xinit=[xk-1, xk-2, ...], uinit=[uk-1, uk-2, ...])
+    
+The length of xinit must be the same as the denominator order.  The 
+length of uinit must be the same as the numerator order.
+"""
+        if xinit is not None:
+            xinit = np.array(xinit)
+            if xinit.size != self.den.coef.size-1:
+                raise Exception("SIM: xinit must have length den.order()")
+            self._xhist = xinit
+        if uinit is not None:
+            uinit = np.array(uinit)
+            if uinit.size != self.num.coef.size-1:
+                raise Exception("SIM: uinit must have length num.order()")
+            self._uhist = uinit
+        xk = uk * self.num.coef[-1] + np.dot(self.num.coef[:-1], self._uhist)
+        xk += -np.dot(self.den.coef[:-1], self._xhist) / self.den.coef[-1]
+        # Rotate in the new values
+        if self.den.order():
+            self._xhist = np.roll(self._xhist,-1)
+            self._xhist[-1] = xk
+        if self.num.order():
+            self._uhist = np.roll(self._uhist,-1)
+            self._uhist[-1] = uk
+        return xk
+        
+    def impulse(self, Nmax=None, verbose=True, figure=None):
+        """System step response
+"""
+        if Nmax is None:
+            # Auto-detect the sample count
+            Nmax = 20
+            for z in self.poles():
+                if z!=1.:
+                    z = np.log(z)
+                    sigma = np.abs(z.real)
+                    omega = np.abs(z.imag)
+                    if sigma > 1e-6:
+                        Nmax = max(Nmax,
+                            int(10/sigma))
+                    if omega > 1e-6:
+                        Nmax = max(Nmax,
+                            int(4*np.pi/omega))
+        
+        x = np.zeros((Nmax,))
+        x[0] = self.sim(1./self.T, 
+                xinit = np.zeros((self.den.order(),)),
+                uinit = np.zeros((self.num.order(),)))
+        for k in range(1,Nmax):
+            x[k] = self.sim(0.)
+            
+        if verbose:
+            if figure is None:
+                figure=1
+            ax = plt.figure(figure).get_axes()
+            if ax:
+                ax = ax[0]
+            else:
+                ax = plt.figure(figure).add_subplot(111)
+            t = np.arange(0., self.T * x.size, self.T)
+            ax.plot(t,x)
+            ax.set_xlabel('Time')
+            ax.set_ylabel('X')
+            ax.grid('on')
+            plt.show(block=False)
+            
+        return x
+
+        
+    def step(self, Nmax=None, verbose=True, figure=None):
+        """System step response
+"""
+        if Nmax is None:
+            # Auto-detect the sample count
+            Nmax = 20
+            for z in self.poles():
+                if z!=1.:
+                    z = np.log(z)
+                    sigma = np.abs(z.real)
+                    omega = np.abs(z.imag)
+                    if sigma > 1e-6:
+                        Nmax = max(Nmax,
+                            int(10/sigma))
+                    if omega > 1e-6:
+                        Nmax = max(Nmax,
+                            int(4*np.pi/omega))
+        
+        x = np.zeros((Nmax,))
+        x[0] = self.sim(1.,
+                xinit = np.zeros((self.den.order(),)),
+                uinit = np.zeros((self.num.order(),)))
+        for k in range(1,Nmax):
+            x[k] = self.sim(1.)
+            
+        if verbose:
+            if figure is None:
+                figure=1
+            ax = plt.figure(figure).get_axes()
+            if ax:
+                ax = ax[0]
+            else:
+                ax = plt.figure(figure).add_subplot(111)
+            t = np.arange(0., self.T * x.size, self.T)
+            ax.plot(t,x)
+            ax.set_xlabel('Time')
+            ax.set_ylabel('X')
+            ax.grid('on')
+            plt.show(block=False)
+            
+        return x
