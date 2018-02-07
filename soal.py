@@ -254,22 +254,86 @@ polynomial is simple enough for explicit root calculation.
             self.coef = self.coef[:ii+1]
             self._roots = None
 
+    def _rsmallj(self, z, pz=None, small=1e-6, verbose=False):
+        """Test a complex root to see if it can be truncated to a real root
+    z = _rsmallj(z, pz, small=1e-6)
+    
+z is the root under test
+pz is the value of the polynomial evaluated at z or its absolute value.  
+    If it is not specified, the polynomial will be evaluated to provide
+    a value.  
+
+If the imaginary component is less than SMALL, the imaginary component 
+is discarded.  If the new purely real zero evaluates to an error smaller
+than the previous complex zero, then the real value is returned.
+"""
+        if pz is None:
+            pz = self(z)
+        if abs(z.imag) < small \
+                and np.abs(self(z.real)) <= np.abs(pz):
+            z = z.real
+            if verbose:
+                os.sys.stdout.write(
+                    "  Truncating to a real root\n")
+        return z
+
 
     def _riter(self, zinit=0., small=1e-6, smallj=1e-6, 
                 tiny=1e-15, Nmax=100, verbose=False):
         """Iterative root finding algorithm
-    z = p._riter(zinit = 0., small=1e-6, smallj=1e-6 tiny=1e-16, 
+    z = p._riter(zinit = 0., small=1e-6, smallj=1e-6 tiny=1e-15, 
                     Nmax=100, verbose=False)
 
-Returns a single root of p using a Mueler iteration variant.
+Returns a single root of p.  Iteration is conducted in three stages:
+1) a quadratic iteration is used for global convergence.  The second and
+    first derivatives are evaluated using p.d(zguess, 2).  The next 
+    guess is taken to be one of the quadratic roots of the polynomial
+        f + df*(x-zguess) + 0.5*ddf*(x-zguess)**2
+    when f, df, and ddf are the polynomial value and its derivatives.
+    This method is used until the absolute value of f is less than
+    SMALL.  Similar to Mueler iteration, it provides global convergence.
+    
+2) a newton algorithm provides root "polishing" until the polynomial
+    evaluates to a magnitude less thant TINY.  This stage has two 
+    logical checks to prevent accidental divergence and to automatically
+    detect slow convergence due to redundant roots.
 
-zinit is the initial guess for the zero.
-Quadratic iteration is used until the polynomial evaluates to less
-than SMALL.  Then, Newton iteration is used until the polynomial
-evaluates to less than TINY.
-Nmax is the maximum number of polynomial evaluations permitted.
-If the imaginary component of the root is less than SMALL, it is
-forced to zero.
+2a) No guess may evaluate to a polynomial value greater in magnitude 
+    than the one prior.  If this event is detected, it means the guess
+    has "overshot" the root.  The distance to the guess is halved and 
+    the check is repeated until a lower error is found.
+    
+2b) When Newton iteration approaches redundant roots, the guesses adopt 
+    a geometric convergence that slows with the number of local roots.
+    For a polynomial,
+        p(x) = (x-z)**n * q(x)
+    The newton step size will be
+        dx = -p / p' =approx= (x-z)/n
+    For each step of newton iteration, the number of local roots, n is 
+    approximated by comparing dx against the prior dx.  If the 
+    approximation for n is stable for two iteration steps in a row, then
+    the next step is compensated to place it as close as possible to the
+    actual root.
+    
+    In tests with precisely redundant roots, the algorithm usually 
+    converges immediately.  In tests with redundant roots that are only
+    quite close, this places the next guess near the center of the root
+    cluster, at which points the roots no longer appear identical, and 
+    normal newton iteration can resume.
+
+3) Once convergence is detected, the root is "cleaned."  In this stage,
+    it is checked for proximity to the real axis.  If the imaginary 
+    component is less than SMALLJ, the imaginary component is discarded.
+    If the new purely real zero evaluates to an error smaller than the 
+    previous complex zero, then the real value is returned.
+
+ZINIT is the initial guess for the zero.
+SMALL is the threshold for transition from quadratic to newton iteration
+TINY is the threshold used for convergence
+NMAX is the maximum number of polynomial evaluations permitted before an
+    exception is raised.
+SMALLJ is threshold for proximity to the real axis that will trigger 
+    testing for truncating to a purely real root.
 """
         count=0
         z = complex(zinit)
@@ -294,6 +358,10 @@ forced to zero.
                     "z %d = %e + %ej\n"%(count, z.real, z.imag) +
                     "p(z) = %e + %ej\n"%(p.real, p.imag))
             count += 1
+            
+        # Check for proximity to the real axis
+        z = self._rsmallj(z,p,verbose=verbose)
+            
         # Polish with Newton iteration
         dz = -p/dp      # First iteration step
         e = np.abs(p)   # Error
@@ -340,8 +408,8 @@ forced to zero.
             raise Exception('_RITER: Failed to converge in %d iterations'%Nmax)
 
         # Test for small imaginary components
-        if abs(z.imag) < smallj:
-            z = z.real
+        z = self._rsmallj(z,e, verbose=verbose)
+
         return z
         
     def _rexpl(self):
@@ -361,7 +429,7 @@ Z is an array of roots 0 to 2 elements long.
             # If the result is complex
             if temp<0.:
                 temp = 1j * np.sqrt(np.abs(temp)) / 2. / c[2]
-                return np.array([temp, -temp]) - c[1]/2./c[2]
+                return np.array([temp,-temp]) - c[1]/2./c[2]
             # Now case out which method should be used to minimize numerical error
             elif c[1]<0:
                 temp = -c[1] - np.sqrt(temp)
@@ -401,7 +469,7 @@ derivatives in order, so that dp[n] is the nth derivative.
         return np.array(y)
         
         
-    def roots(self):
+    def roots(self, verbose=False):
         """Calculate the roots (zeros) of the polynomial
     z = p.roots()
 Returns an array, z, of the polynomial roots so that p(z)==0
@@ -416,13 +484,24 @@ returned to prevent redundant iteration.  It is, therefore,
 efficient to make multiple calls to the roots method.
 """
         if self.coef.size <= 1:
+            if verbose:
+                os.sys.stdout.write(
+                    "Polynomial is only a constant: no roots.\n")
             self._roots = []
             return self._roots
         if self._roots is None:
+            if verbose:
+                os.sys.stdout.write(
+                    "Found no root history: calculating roots from scratch.\n")
             _roots = []
             # Create a deflatable polynomial
             dd = Poly(self)
             dd._rzeros()
+
+            if verbose:
+                os.sys.stdout.write(
+                    "Creating a deflatable polynomial:%s"%repr(dd))
+
             # Remove any roots at the origin
             for ii in range(self.coef.size):
                 if self.coef[ii]!=0.:
@@ -430,9 +509,16 @@ efficient to make multiple calls to the roots method.
             if ii>0:
                 _roots += [0.]*ii
                 dd.coef = dd.coef[ii:]
+                    
+                if verbose:
+                    os.sys.stdout.write(
+                        "Found %d roots at the origin... deflating.\n"%ii)
 
             # If there are no roots left, halt
             if dd.coef.size<=1:
+                if verbose:
+                    os.sys.stdout.write(
+                        "All roots were at the origin...[done]\n")
                 self._roots = _roots
                 return self._roots
 
@@ -445,6 +531,11 @@ efficient to make multiple calls to the roots method.
             for ii in range(1,dd.coef.size):
                 dd.coef[ii] *= temp
                 temp *= scale
+                
+            if verbose:
+                os.sys.stdout.write(
+                    "Rescaling the deflatable polynomial:%s"%repr(dd))
+                
             # Start iteration
             z = 0.
             while dd.coef.size > 3:
@@ -453,16 +544,42 @@ efficient to make multiple calls to the roots method.
                 # identified and will be in sequence to one another
                 z = dd._riter(zinit=z)
                 _roots.append(z)
+                
+                if verbose:
+                    os.sys.stdout.write(
+                        "Found root using _riter():\n  %s\n"%repr(z))
+                
                 if z.imag:
                     _roots.append(np.conj(z))
                     dd /= [z.imag*z.imag+z.real*z.real, -2*z.real, 1.]
+                    if verbose:
+                        os.sys.stdout.write(
+                            "Root was complex: adding the conjugate.\n")
                 else:
                     dd /= [-z, 1.]
+                if verbose:
+                    os.sys.stdout.write(
+                        "Deflating the polynomial:%s"%repr(dd))
             if dd.coef.size>1:
-                self._roots = np.concatenate((_roots, dd._rexpl()))
+                z = dd._rexpl()
+                if verbose:
+                    os.sys.stdout.write(
+                        "Polynomial was deflated to permit explicit root solution:\n")
+                for zz in z:
+                    os.sys.stdout.write("  %s\n"%repr(zz))
+                self._roots = np.concatenate((_roots, z))
             else:
                 self._roots = np.array(_roots)
+            
             self._roots *= scale
+            
+            if verbose:
+                os.sys.stdout.write(
+                    "Rescaling the roots:\n%s\n"%repr(self._roots))
+        elif verbose:
+            os.sys.stdout.write(
+                "Found a root record: returning\n" + 
+                "To clear, set the _roots member to None\n")
         return self._roots
         
         
